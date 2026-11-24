@@ -87,7 +87,7 @@ func (m *Manifest) Plan(root string, names []string, force bool) ([]Step, error)
 	for _, name := range names {
 		p, ok := m.Find(name)
 		if !ok {
-			return nil, fmt.Errorf("%s is not in the package index (see: gdsh search)", name)
+			return nil, fmt.Errorf("%s is not in the package index (see: gdsh package search)", name)
 		}
 		if err := visit(p, ""); err != nil {
 			return nil, err

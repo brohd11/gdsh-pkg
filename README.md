@@ -2,8 +2,8 @@
 
 Installs gdsh command packages into a command root (`<root>/packages/<name>`) from the reviewed
 index [godot-gdsh-lib-manifest](https://github.com/brohd11/godot-gdsh-lib-manifest). It is
-shared by mcp-sh-godot (`mcp_sh_godot gdsh install`) and gdsh_cli. It has no dependencies
-outside the standard library.
+shared by the gdsh CLI (`gdsh package install`) and mcp-sh-godot
+(`mcp_sh_godot gdsh package install`). It has no dependencies outside the standard library.
 
 ```go
 c := &gdshpkg.Client{}                   // published index, cached for a day
