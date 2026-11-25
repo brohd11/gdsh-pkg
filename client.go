@@ -2,6 +2,8 @@ package gdshpkg
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +24,8 @@ type Client struct {
 	ManifestURL string
 	// ArchiveURL is a zip of repo at commit; default GitHub's codeload archive.
 	ArchiveURL func(repo, commit string) string
+	// AssetURL is a file of repo's release at tag; default GitHub's release download.
+	AssetURL func(repo, tag, asset string) string
 	// CacheDir holds manifest.json; default <user cache>/gdsh.
 	CacheDir string
 	TTL      time.Duration
@@ -40,6 +44,13 @@ func (c *Client) archiveURL(repo, commit string) string {
 		return c.ArchiveURL(repo, commit)
 	}
 	return fmt.Sprintf("https://github.com/%s/archive/%s.zip", repo, commit)
+}
+
+func (c *Client) assetURL(repo, tag, asset string) string {
+	if c.AssetURL != nil {
+		return c.AssetURL(repo, tag, asset)
+	}
+	return fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", repo, tag, asset)
 }
 
 func (c *Client) cachePath() string {
@@ -152,4 +163,52 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 // Archive downloads repo at commit as a zip.
 func (c *Client) Archive(ctx context.Context, repo, commit string) ([]byte, error) {
 	return c.Get(ctx, c.archiveURL(repo, commit))
+}
+
+// Asset downloads a file of repo's release at tag.
+func (c *Client) Asset(ctx context.Context, repo, tag, asset string) ([]byte, error) {
+	return c.Get(ctx, c.assetURL(repo, tag, asset))
+}
+
+// SHA256 is data's hex digest, as an index pins a release asset.
+func SHA256(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// AssetChangedError is a release asset that no longer matches its pinned digest.
+type AssetChangedError struct {
+	Pkg Package
+	Got string
+}
+
+func (e AssetChangedError) Error() string {
+	return fmt.Sprintf("release asset %s of %s %s changed since it was reviewed (sha256 %s, pinned %s)",
+		e.Pkg.Asset, e.Pkg.Repo, e.Pkg.Tag, short(e.Got), short(e.Pkg.SHA256))
+}
+
+func short(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
+}
+
+// Fetch downloads what p installs: its release asset, checked against the pinned sha256, or
+// else its repo at the pinned commit.
+func (c *Client) Fetch(ctx context.Context, p Package) ([]byte, error) {
+	if p.Asset == "" {
+		return c.Archive(ctx, p.Repo, p.Commit)
+	}
+	if p.SHA256 == "" {
+		return nil, fmt.Errorf("%s has no pinned sha256 for its release asset", p.Name)
+	}
+	data, err := c.Asset(ctx, p.Repo, p.Tag, p.Asset)
+	if err != nil {
+		return nil, err
+	}
+	if got := SHA256(data); !strings.EqualFold(got, p.SHA256) {
+		return nil, AssetChangedError{p, got}
+	}
+	return data, nil
 }

@@ -3,6 +3,7 @@ package gdshpkg
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -105,4 +106,47 @@ func writeZipFile(f *zip.File, dest string) error {
 		err = cerr
 	}
 	return err
+}
+
+// PackageRoot is the folder of an unpacked archive that holds the package: the shallowest one
+// with a package.cfg, outside vendor/ folders (an export's bundled libraries have their own).
+// That is dir for a repo archive and addons/.../<name> for an export laid out by project path.
+func PackageRoot(dir string) (string, error) {
+	level := []string{dir}
+	for len(level) > 0 {
+		var found, next []string
+		for _, d := range level {
+			if _, err := os.Stat(filepath.Join(d, "package.cfg")); err == nil {
+				found = append(found, d)
+				continue
+			}
+			entries, err := os.ReadDir(d)
+			if err != nil {
+				return "", err
+			}
+			for _, e := range entries {
+				if e.IsDir() && e.Name() != "vendor" {
+					next = append(next, filepath.Join(d, e.Name()))
+				}
+			}
+		}
+		switch len(found) {
+		case 0:
+			level = next
+		case 1:
+			return found[0], nil
+		default:
+			return "", fmt.Errorf("archive: more than one package.cfg at the same depth: %s", strings.Join(relAll(dir, found), ", "))
+		}
+	}
+	return "", errors.New("archive has no package.cfg")
+}
+
+func relAll(base string, paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		r, _ := filepath.Rel(base, p)
+		out[i] = filepath.ToSlash(r)
+	}
+	return out
 }

@@ -1,6 +1,8 @@
 // Package gdshpkg installs gdsh command packages into a command root (<root>/packages/<name>)
 // from a reviewed index: godot-gdsh-lib-manifest. Each entry pins a tag and the commit it was
-// reviewed at; installs download that commit, so a moved tag can't change what is served.
+// reviewed at; installs download that commit, so a moved tag can't change what is served. An
+// entry with an asset installs that file of the tag's release (an exported zip) instead, pinned
+// by its sha256, since a release asset can be replaced under the same tag.
 package gdshpkg
 
 import (
@@ -31,6 +33,10 @@ type Package struct {
 	Tags    []string `json:"tags,omitempty"`
 	Tag     string   `json:"tag"`
 	Commit  string   `json:"commit"`
+	// Asset names a file of Tag's release to install instead of the source at Commit: an
+	// export that bundles what the source lacks. SHA256 is its digest when it was reviewed.
+	Asset  string `json:"asset,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
 	// Gdsh is the lowest gdsh version the package requires.
 	Gdsh string `json:"gdsh,omitempty"`
 	// Requires are other indexed gdsh packages (repos), installed as siblings.
@@ -56,6 +62,9 @@ func ParseManifest(data []byte) (*Manifest, error) {
 		}
 		if strings.ContainsAny(p.Name, `/\.`) {
 			return nil, fmt.Errorf("manifest: invalid package name %q", p.Name)
+		}
+		if p.Asset != "" && (strings.ContainsAny(p.Asset, `/\`) || strings.HasPrefix(p.Asset, ".")) {
+			return nil, fmt.Errorf("manifest: %s: invalid asset name %q", p.Name, p.Asset)
 		}
 		if names[p.Name] || repos[strings.ToLower(p.Repo)] {
 			return nil, fmt.Errorf("manifest: %s / %s listed twice", p.Name, p.Repo)

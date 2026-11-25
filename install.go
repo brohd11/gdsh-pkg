@@ -61,6 +61,9 @@ func (m *Manifest) Plan(root string, names []string, force bool) ([]Step, error)
 		if p.Commit == "" {
 			return fmt.Errorf("%s has no pinned commit in the index", p.Name)
 		}
+		if p.Asset != "" && p.SHA256 == "" {
+			return fmt.Errorf("%s has no pinned sha256 for its release asset in the index", p.Name)
+		}
 		visiting[p.Name] = true
 		for _, repo := range p.Requires {
 			dep, ok := m.Find(repo)
@@ -120,7 +123,7 @@ func (c *Client) Install(ctx context.Context, root string, steps []Step, report 
 }
 
 func (c *Client) installOne(ctx context.Context, root string, p Package, report func(string)) error {
-	data, err := c.Archive(ctx, p.Repo, p.Commit)
+	data, err := c.Fetch(ctx, p)
 	if err != nil {
 		return err
 	}
@@ -137,9 +140,14 @@ func (c *Client) installOne(ctx context.Context, root string, p Package, report 
 	if err := Extract(data, tmp); err != nil {
 		return err
 	}
-	cfgData, err := os.ReadFile(filepath.Join(tmp, "package.cfg"))
+	// The package itself: tmp for a repo archive, deeper for an export laid out by project path.
+	pkgDir, err := PackageRoot(tmp)
 	if err != nil {
-		return errors.New("archive has no package.cfg")
+		return err
+	}
+	cfgData, err := os.ReadFile(filepath.Join(pkgDir, "package.cfg"))
+	if err != nil {
+		return err
 	}
 	cfg, err := ParseCfg(cfgData)
 	if err != nil {
@@ -148,13 +156,13 @@ func (c *Client) installOne(ctx context.Context, root string, p Package, report 
 	if got := cfg.InstallName(); got != p.Name {
 		return fmt.Errorf("package.cfg path names %q, the index %q", got, p.Name)
 	}
-	if _, err := os.Stat(filepath.Join(tmp, "cmd")); err != nil {
+	if _, err := os.Stat(filepath.Join(pkgDir, "cmd")); err != nil {
 		return errors.New("archive has no cmd/ folder")
 	}
 	if cfg.Version != "" && CompareVersions(cfg.Version, p.Tag) != 0 {
 		report(fmt.Sprintf("warning: %s %s says version %s", p.Name, p.Tag, cfg.Version))
 	}
-	return swapIn(tmp, filepath.Join(PackagesDir(root), p.Name))
+	return swapIn(pkgDir, filepath.Join(PackagesDir(root), p.Name))
 }
 
 // swapIn moves src to dest, replacing any dest; on failure the old dest is put back.

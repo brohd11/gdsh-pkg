@@ -16,12 +16,14 @@ import (
 
 const usage = `usage:
   gdsh-manifest check [-w] [-f FILE]
-      Check every entry at its pinned commit: the tag still points there, package.cfg names the
-      entry, it has cmd/manifest.gd and no absolute res://addons paths. Derived fields (gdsh,
+      Check every entry at its pinned commit (or its release asset, whose sha256 must match):
+      the tag still points there, package.cfg names the entry, it has cmd/manifest.gd and no
+      absolute res://addons paths. Derived fields (gdsh,
       requires, project_only) must match package.cfg; -w rewrites them instead of failing.
   gdsh-manifest pin NAME TAG [-f FILE]
-      Pin NAME to TAG and the commit it points at now, and re-derive the entry. Review the
-      package at that commit first: this is what installs will serve.
+      Pin NAME to TAG and the commit it points at now, and re-derive the entry. An entry with
+      an "asset" also pins that file of TAG's release by its sha256. Review the package at that
+      commit (and the asset) first: this is what installs will serve.
   gdsh-manifest propose [--tsv] [-f FILE]
       List entries with a newer tag than their pin. --tsv prints name, repo, from, to and a
       compare URL per line, for the propose workflow.
@@ -102,7 +104,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, m *maint.
 			return 1
 		}
 		p, _ := man.Find(pos[0])
-		fmt.Fprintf(stdout, "Pinned %s to %s (%s)\n", p.Name, p.Tag, p.Commit)
+		if p.Asset != "" {
+			fmt.Fprintf(stdout, "Pinned %s to %s (%s), release asset %s sha256 %s\n", p.Name, p.Tag, p.Commit, p.Asset, p.SHA256)
+		} else {
+			fmt.Fprintf(stdout, "Pinned %s to %s (%s)\n", p.Name, p.Tag, p.Commit)
+		}
 		return 0
 	case "propose":
 		if len(pos) != 0 {

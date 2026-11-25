@@ -164,3 +164,70 @@ func TestPinAndPropose(t *testing.T) {
 		t.Errorf("compare: %s", props[0].CompareURL())
 	}
 }
+
+// exportZip is a release export laid out by project path, bundling util-r (per its lock file).
+func exportZip(t *testing.T, version, marker string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	pkg := "addons/_lib/gdsh_lib/kit/"
+	for p, body := range map[string]string{
+		pkg + "package.cfg":                           cfg("kit", version, "brohd11/godot-gdsh@v0.5.0", "o/util-r@v1", "o/level@v0.1.0"),
+		pkg + "cmd/manifest.gd":                       "",
+		pkg + "cmd/kit/kit.gd":                        base + "# " + marker + "\n",
+		pkg + "vendor/addons/_lib/util_r/package.cfg": "[package]\npath=\"addons/_lib/util_r\"\n",
+		pkg + ".export_lock.json":                     `{"deps": [{"repo_id": "github.com/o/util-r", "tag": "v1"}]}`,
+	} {
+		w, _ := zw.Create(p)
+		w.Write([]byte(body))
+	}
+	zw.Close()
+	return buf.Bytes()
+}
+
+func TestReleaseAsset(t *testing.T) {
+	served := exportZip(t, "0.2.0", "v1")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/o/kit/releases/download/v0.2.0/kit.zip" {
+			w.Write(served)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	m := &Maint{
+		Client: &gdshpkg.Client{AssetURL: func(repo, tag, asset string) string {
+			return srv.URL + "/" + repo + "/releases/download/" + tag + "/" + asset
+		}},
+		LsRemote: func(context.Context, string) (map[string]string, error) {
+			return map[string]string{"v0.2.0": "k2", "v0.3.0": "k3"}, nil
+		},
+	}
+	man, err := gdshpkg.ParseManifest([]byte(`{"version": 1, "packages": [
+  {"name": "level", "repo": "o/level", "summary": "s", "tag": "v0.1.0", "commit": "c1", "requires": []},
+  {"name": "kit", "repo": "o/kit", "summary": "s", "tag": "", "commit": "", "asset": "kit.zip", "requires": []}
+]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := m.Pin(ctx, man, "kit", "v0.3.0"); err == nil || !strings.Contains(err.Error(), "publish the release first") {
+		t.Errorf("a tag without the release asset should fail: %v", err)
+	}
+	problems, err := m.Pin(ctx, man, "kit", "v0.2.0")
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("pin: %v %v", err, problems)
+	}
+	kit, _ := man.Find("kit")
+	// util-r is bundled, so it is neither required nor project-only; level is still a sibling.
+	if kit.Commit != "k2" || kit.SHA256 != gdshpkg.SHA256(served) || kit.Gdsh != "v0.5.0" ||
+		strings.Join(kit.Requires, ",") != "o/level" || kit.ProjectOnly != nil {
+		t.Errorf("pinned: %+v", kit)
+	}
+
+	served = exportZip(t, "0.2.0", "v2")
+	problems, err = m.Derive(ctx, man, "kit")
+	if err != nil || !has(problems, true, "kit", "changed since it was reviewed") {
+		t.Errorf("a replaced asset should fail the check: %v %v", err, problems)
+	}
+}

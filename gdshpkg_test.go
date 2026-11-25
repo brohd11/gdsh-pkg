@@ -262,3 +262,101 @@ func TestSearch(t *testing.T) {
 		t.Error("an unknown version should be refused")
 	}
 }
+
+// exportZip is a release export: laid out by project path, with bundled libraries under vendor/
+// that carry their own package.cfg, and the export's lock file.
+func exportZip(t *testing.T, name, version, marker string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	pkg := "addons/_lib/gdsh_lib/" + name + "/"
+	files := map[string]string{
+		pkg + "package.cfg":                              "[package]\nversion=\"" + version + "\"\npath=\"" + pkg + "\"\nrequire=[]\n",
+		pkg + "cmd/manifest.gd":                          "extends RefCounted\n",
+		pkg + "cmd/" + name + "/" + name + ".gd":         "# " + marker + "\n",
+		pkg + "vendor/addons/_lib/util_r/package.cfg":    "[package]\nversion=\"1.0\"\npath=\"addons/_lib/util_r\"\n",
+		pkg + "vendor/addons/_lib/util_r/src/bundled.gd": "# bundled\n",
+		pkg + ".export_lock.json":                        `{"deps": []}`,
+	}
+	for p, body := range files {
+		w, _ := zw.Create(p)
+		w.Write([]byte(body))
+	}
+	zw.Close()
+	return buf.Bytes()
+}
+
+func TestInstallReleaseAsset(t *testing.T) {
+	asset := exportZip(t, "level", "0.3.0", "v1")
+	served := asset
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/o/godot-gdsh-lib-level/releases/download/v0.3.0/level.zip" {
+			w.Write(served)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	c := &Client{AssetURL: func(repo, tag, name string) string {
+		return srv.URL + "/" + repo + "/releases/download/" + tag + "/" + name
+	}}
+	m, err := ParseManifest([]byte(`{"version": 1, "packages": [
+  {"name": "level", "repo": "o/godot-gdsh-lib-level", "summary": "s", "tag": "v0.3.0", "commit": "c1",
+   "asset": "level.zip", "sha256": "` + SHA256(asset) + `", "requires": []}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	steps, err := m.Plan(root, []string{"level"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Install(ctx, root, steps, nil); err != nil {
+		t.Fatal(err)
+	}
+	level := filepath.Join(root, "packages", "level")
+	for _, p := range []string{"package.cfg", "cmd/level/level.gd", "vendor/addons/_lib/util_r/src/bundled.gd"} {
+		if _, err := os.Stat(filepath.Join(level, p)); err != nil {
+			t.Error(err)
+		}
+	}
+	if installed, _ := ListInstalled(root); len(installed) != 1 || installed[0].Cfg.Version != "0.3.0" {
+		t.Errorf("installed: %+v", installed)
+	}
+
+	// The asset is replaced under the same tag: refused, and the installed copy is untouched.
+	served = exportZip(t, "level", "0.3.0", "v2")
+	steps, _ = m.Plan(root, []string{"level"}, true)
+	err = c.Install(ctx, root, steps, nil)
+	var changed AssetChangedError
+	if !errors.As(err, &changed) || !strings.Contains(err.Error(), "changed since it was reviewed") {
+		t.Errorf("replaced asset: %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(level, "cmd/level/level.gd")); string(data) != "# v1\n" {
+		t.Errorf("installed copy changed: %q", data)
+	}
+
+	// No digest pinned: not installable.
+	m.Packages[0].SHA256 = ""
+	if _, err := m.Plan(t.TempDir(), []string{"level"}, false); err == nil || !strings.Contains(err.Error(), "no pinned sha256") {
+		t.Errorf("missing sha256: %v", err)
+	}
+	if _, err := ParseManifest([]byte(`{"version": 1, "packages": [{"name": "x", "repo": "o/x", "asset": "../x.zip"}]}`)); err == nil {
+		t.Error("an asset path should be refused")
+	}
+}
+
+func TestPackageRoot(t *testing.T) {
+	dir := t.TempDir()
+	for _, p := range []string{"a/one/package.cfg", "a/two/package.cfg"} {
+		os.MkdirAll(filepath.Dir(filepath.Join(dir, p)), 0o755)
+		os.WriteFile(filepath.Join(dir, p), nil, 0o644)
+	}
+	if _, err := PackageRoot(dir); err == nil || !strings.Contains(err.Error(), "a/one, a/two") {
+		t.Errorf("two packages: %v", err)
+	}
+	if _, err := PackageRoot(t.TempDir()); err == nil {
+		t.Error("no package.cfg should fail")
+	}
+}

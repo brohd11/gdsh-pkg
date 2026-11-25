@@ -4,13 +4,17 @@
 package maint
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -162,21 +166,41 @@ func (m *Maint) derive(ctx context.Context, man *gdshpkg.Manifest, p *gdshpkg.Pa
 		add(false, "tag %s moved from the reviewed commit %s to %s; review before re-pinning", p.Tag, short(p.Commit), short(sha))
 	}
 
-	data, err := m.client().Archive(ctx, p.Repo, p.Commit)
+	if p.Asset != "" && p.SHA256 == "" {
+		add(true, "no sha256 pin for release asset %s; set one with: gdsh-manifest pin %s TAG", p.Asset, p.Name)
+		return problems, nil
+	}
+	// What installs get: the release asset when there is one, so that is what is checked.
+	data, err := m.client().Fetch(ctx, *p)
+	var changed gdshpkg.AssetChangedError
+	if errors.As(err, &changed) {
+		add(true, "%v; review it and re-pin", err)
+		return problems, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	dir, err := os.MkdirTemp("", "gdsh-manifest-")
+	src := "commit " + short(p.Commit)
+	if p.Asset != "" {
+		src = "release asset " + p.Asset
+	}
+	tmp, err := os.MkdirTemp("", "gdsh-manifest-")
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(dir)
-	if err := gdshpkg.Extract(data, dir); err != nil {
-		return nil, err
+	defer os.RemoveAll(tmp)
+	if err := gdshpkg.Extract(data, tmp); err != nil {
+		add(true, "%s: %v", src, err)
+		return problems, nil
+	}
+	dir, err := gdshpkg.PackageRoot(tmp)
+	if err != nil {
+		add(true, "%s: %v", src, err)
+		return problems, nil
 	}
 	cfgData, err := os.ReadFile(filepath.Join(dir, "package.cfg"))
 	if err != nil {
-		add(true, "no package.cfg at %s", short(p.Commit))
+		add(true, "no package.cfg in %s", src)
 		return problems, nil
 	}
 	cfg, err := gdshpkg.ParseCfg(cfgData)
@@ -197,11 +221,19 @@ func (m *Maint) derive(ctx context.Context, man *gdshpkg.Manifest, p *gdshpkg.Pa
 		add(true, "not relocatable (a command root is outside res://addons): %s", hit)
 	}
 
+	// An export bundles its libraries; those need no install of their own.
+	bundled := map[string]bool{}
+	if p.Asset != "" {
+		bundled = bundledRepos(data)
+	}
 	p.Gdsh, p.Requires, p.ProjectOnly = "", []string{}, nil
 	for _, spec := range cfg.Require {
 		repo, tag := gdshpkg.SplitRequire(spec)
 		if strings.EqualFold(repo, gdshpkg.GdshRepo) {
 			p.Gdsh = tag
+			continue
+		}
+		if bundled[strings.ToLower(repo)] {
 			continue
 		}
 		if dep, ok := man.Find(repo); ok {
@@ -217,6 +249,41 @@ func (m *Maint) derive(ctx context.Context, man *gdshpkg.Manifest, p *gdshpkg.Pa
 	sort.Strings(p.Requires)
 	sort.Strings(p.ProjectOnly)
 	return problems, nil
+}
+
+// bundledRepos lists the repos ("owner/repo", lower case) an export vendors, from the
+// .export_lock.json files in its zip (Extract leaves dot files out, so the zip is read).
+func bundledRepos(data []byte) map[string]bool {
+	out := map[string]bool{}
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return out
+	}
+	for _, f := range zr.File {
+		if path.Base(f.Name) != ".export_lock.json" || f.UncompressedSize64 > 1<<20 {
+			continue
+		}
+		r, err := f.Open()
+		if err != nil {
+			continue
+		}
+		var lock struct {
+			Deps []struct {
+				RepoID string `json:"repo_id"`
+			} `json:"deps"`
+		}
+		err = json.NewDecoder(r).Decode(&lock)
+		r.Close()
+		if err != nil {
+			continue
+		}
+		for _, d := range lock.Deps {
+			if repo, _ := gdshpkg.SplitRequire(d.RepoID); repo != "" {
+				out[strings.ToLower(repo)] = true
+			}
+		}
+	}
+	return out
 }
 
 func (m *Maint) exists(ctx context.Context, repo, ref, file string) bool {
@@ -265,7 +332,8 @@ func absolutePaths(dir string) []string {
 	return hits
 }
 
-// Pin points name at tag (resolved to its commit) and re-derives that entry.
+// Pin points name at tag (resolved to its commit), and for an entry with an asset at the
+// digest of that release asset now, and re-derives that entry.
 func (m *Maint) Pin(ctx context.Context, man *gdshpkg.Manifest, name, tag string) ([]Problem, error) {
 	p, ok := man.Find(name)
 	if !ok {
@@ -278,6 +346,13 @@ func (m *Maint) Pin(ctx context.Context, man *gdshpkg.Manifest, name, tag string
 	sha, ok := tags[tag]
 	if !ok {
 		return nil, fmt.Errorf("%s has no tag %s", p.Repo, tag)
+	}
+	if p.Asset != "" {
+		data, err := m.client().Asset(ctx, p.Repo, tag, p.Asset)
+		if err != nil {
+			return nil, fmt.Errorf("release asset %s of %s %s: %w (export and publish the release first)", p.Asset, p.Repo, tag, err)
+		}
+		p.SHA256 = gdshpkg.SHA256(data)
 	}
 	p.Tag, p.Commit = tag, sha
 	return m.Derive(ctx, man, p.Name)
